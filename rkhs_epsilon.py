@@ -2,6 +2,7 @@ import numpy as np
 from scipy.spatial.distance import cdist, pdist
 from scipy.linalg import eigh
 from sklearn.cluster import KMeans, DBSCAN
+from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
 def _rbf_kernel(X, Y=None, bandwidth=1.0):
@@ -133,11 +134,15 @@ class RKHSEpsilonMachine:
     cluster_standardize : bool
         Whether to standardize clustering coordinates before clustering.
     n_states : int or None
-        Number of causal states. Required for kmeans. Ignored by dbscan.
+        Number of causal states for kmeans. If None, selected automatically via
+        the silhouette rule. Ignored by dbscan.
+    n_states_max : int
+        Upper bound on the number of states considered during silhouette
+        selection (kmeans only, used when n_states is None).
     dbscan_eps : float
-        DBSCAN radius parameter.
+        DBSCAN radius parameter. Defaults to sklearn's default of 0.5.
     dbscan_min_samples : int
-        DBSCAN minimum sample count.
+        DBSCAN minimum sample count. Defaults to sklearn's default of 5.
     dbscan_noise_strategy : {'nearest_centroid', 'separate_state'}
         How to handle DBSCAN noise points.
     kmeans_n_init : int
@@ -156,8 +161,8 @@ class RKHSEpsilonMachine:
                  diffusion_bandwidth='median', diffusion_alpha=1.0,
                  diffusion_time=1.0, n_components=5,
                  clustering_method='dbscan', cluster_dims=2,
-                 cluster_standardize=True, n_states=None,
-                 dbscan_eps=0.0702, dbscan_min_samples=22,
+                 cluster_standardize=True, n_states=None, n_states_max=10,
+                 dbscan_eps=0.5, dbscan_min_samples=5,
                  dbscan_noise_strategy='nearest_centroid',
                  kmeans_n_init=10, random_state=42,
                  regularization=1e-4, max_mmd_samples=None):
@@ -174,6 +179,7 @@ class RKHSEpsilonMachine:
         self.cluster_dims = cluster_dims
         self.cluster_standardize = cluster_standardize
         self.n_states = n_states
+        self.n_states_max = n_states_max
         self.dbscan_eps = dbscan_eps
         self.dbscan_min_samples = dbscan_min_samples
         self.dbscan_noise_strategy = dbscan_noise_strategy
@@ -232,8 +238,6 @@ class RKHSEpsilonMachine:
         method = self.clustering_method.lower()
         if method not in {'dbscan', 'kmeans'}:
             raise ValueError("clustering_method must be 'dbscan' or 'kmeans'")
-        if method == 'kmeans' and self.n_states is None:
-            raise ValueError("n_states must be provided when clustering_method='kmeans'")
         if self.dbscan_noise_strategy not in {'nearest_centroid', 'separate_state'}:
             raise ValueError(
                 "dbscan_noise_strategy must be 'nearest_centroid' or 'separate_state'")
@@ -386,8 +390,27 @@ class RKHSEpsilonMachine:
         method = self.clustering_method.lower()
 
         if method == 'kmeans':
+            if self.n_states is None:
+                max_k = min(self.n_states_max, len(cluster_input) - 1)
+                best_k, best_score = 2, -1.0
+                for k in range(2, max_k + 1):
+                    km_k = KMeans(
+                        n_clusters=k,
+                        n_init=self.kmeans_n_init,
+                        random_state=self.random_state,
+                    )
+                    lbls_k = km_k.fit_predict(cluster_input)
+                    score = silhouette_score(cluster_input, lbls_k)
+                    if score > best_score:
+                        best_score = score
+                        best_k = k
+                n_clusters = best_k
+                self.silhouette_score_ = best_score
+            else:
+                n_clusters = self.n_states
+                self.silhouette_score_ = None
             kmeans = KMeans(
-                n_clusters=self.n_states,
+                n_clusters=n_clusters,
                 n_init=self.kmeans_n_init,
                 random_state=self.random_state,
             )
