@@ -4,13 +4,16 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from itertools import product
 from time import perf_counter
-from typing import Any, Iterable, Literal
+from typing import TYPE_CHECKING, Any, Iterable, Literal
 
 import numpy as np
 import pandas as pd
 from numpy.typing import ArrayLike
 
 from rkhs_epsilon import RKHSEpsilonMachine
+
+if TYPE_CHECKING:
+    from matplotlib.axes import Axes
 
 GridLike = int | Iterable[int]
 ExecutorKind = Literal["process", "thread"]
@@ -174,4 +177,96 @@ def pivot_sensitivity_metric(
     return results.pivot(index="L_past", columns="L_future", values=metric)
 
 
-__all__ = ["pivot_sensitivity_metric", "run_sensitivity_analysis", "SensitivityRecord"]
+# Thins tick labels so dense grids stay readable.
+def _tick_step(size: int, target_ticks: int = 12) -> int:
+    return max(1, int(np.ceil(size / target_ticks)))
+
+
+# Plots one metric with defaults adapted to discrete or continuous values.
+def plot_sensitivity_heatmap(
+    results: pd.DataFrame,
+    metric: Literal["statistical_complexity", "discovered_states"] = "statistical_complexity",
+    *,
+    ax: Axes | None = None,
+    cmap: str | None = None,
+    annotate: bool | None = None,
+) -> Axes:
+    """Plot a readable sensitivity heatmap."""
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from matplotlib.colors import BoundaryNorm
+    from matplotlib.ticker import MaxNLocator
+
+    grid = pivot_sensitivity_metric(results, metric)
+    rows, cols = grid.shape
+
+    if ax is None:
+        width = min(18.0, max(6.0, cols * 0.45 + 2.0))
+        height = min(14.0, max(5.0, rows * 0.45 + 1.5))
+        _, ax = plt.subplots(figsize=(width, height))
+
+    show_annotations = annotate if annotate is not None else rows * cols <= 144
+    is_discrete = metric == "discovered_states"
+
+    heatmap_kwargs: dict[str, Any] = {
+        "ax": ax,
+        "annot": show_annotations,
+        "fmt": "d" if is_discrete else ".2f",
+        "linewidths": 0.25,
+        "linecolor": "white",
+        "cbar_kws": {"shrink": 0.85, "pad": 0.02},
+    }
+
+    if is_discrete:
+        values = grid.to_numpy(dtype=float)
+        finite_values = values[np.isfinite(values)]
+        if finite_values.size:
+            state_values = np.unique(finite_values.astype(int))
+            boundaries = np.arange(state_values.min() - 0.5, state_values.max() + 1.5, 1.0)
+            heatmap_kwargs["cmap"] = cmap or "viridis"
+            heatmap_kwargs["norm"] = BoundaryNorm(boundaries, plt.get_cmap(heatmap_kwargs["cmap"]).N)
+            heatmap_kwargs["vmin"] = boundaries[0]
+            heatmap_kwargs["vmax"] = boundaries[-1]
+            plot_data = grid.astype(float)
+            if show_annotations:
+                heatmap_kwargs["annot"] = grid.apply(
+                    lambda column: column.map(lambda value: "" if pd.isna(value) else f"{int(value)}")
+                )
+                heatmap_kwargs["fmt"] = ""
+        else:
+            heatmap_kwargs["cmap"] = cmap or "viridis"
+            plot_data = grid
+    else:
+        heatmap_kwargs["cmap"] = cmap or "mako"
+        plot_data = grid
+
+    sns.heatmap(plot_data, **heatmap_kwargs)
+
+    row_step = _tick_step(rows)
+    col_step = _tick_step(cols)
+    ax.set_xticks(np.arange(cols)[::col_step] + 0.5)
+    ax.set_xticklabels(grid.columns[::col_step], rotation=45, ha="right")
+    ax.set_yticks(np.arange(rows)[::row_step] + 0.5)
+    ax.set_yticklabels(grid.index[::row_step], rotation=0)
+
+    ax.set_xlabel("L_future")
+    ax.set_ylabel("L_past")
+    ax.set_title(metric.replace("_", " ").title())
+
+    colorbar = ax.collections[0].colorbar
+    if colorbar is not None and is_discrete:
+        colorbar.locator = MaxNLocator(integer=True)
+        colorbar.update_ticks()
+        colorbar.set_label("Discovered states")
+    elif colorbar is not None:
+        colorbar.set_label("Statistical complexity")
+
+    return ax
+
+
+__all__ = [
+    "pivot_sensitivity_metric",
+    "plot_sensitivity_heatmap",
+    "run_sensitivity_analysis",
+    "SensitivityRecord",
+]
